@@ -4,6 +4,12 @@ checkpoints/
 data/
 wandb/
 
+# Model weights and training checkpoints.
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

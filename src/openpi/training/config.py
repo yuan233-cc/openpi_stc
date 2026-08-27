@@ -19,6 +19,7 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
+import openpi.policies.franka_policy as franka_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -760,6 +761,71 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_franka_sponge",
+        # Low-memory LoRA fine-tuning for a single 32 GB GPU. To switch this config
+        # back to full fine-tuning, use the non-LoRA variants, remove freeze_filter,
+        # and restore EMA.
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=50,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=SimpleDataConfig(
+            repo_id="prs/franka_sponge_pi05",
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[
+                    franka_policy.FrankaInputs(model_type=model.model_type),
+                    # Express translation and SO(3) rotation relative to the chunk's initial state.
+                    # The gripper (dimension 7) remains absolute.
+                    franka_policy.FrankaRelativeActions(),
+                ],
+                outputs=[
+                    # Compose predicted relative rotations back into absolute targets for execution.
+                    franka_policy.FrankaAbsoluteActions(),
+                    franka_policy.FrankaOutputs(),
+                ],
+            ),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image": "image",
+                                "observation/state": "state",
+                                "actions": "actions",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+            ),
+        ),
+        batch_size=8,
+        num_workers=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=250,
+            peak_lr=5e-5,
+            decay_steps=5_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=50,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_train_steps=5_000,
+        save_interval=500,
+        keep_period=1_000,
     ),
     #
     # Fine-tuning Aloha configs.
