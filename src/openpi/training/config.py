@@ -827,6 +827,62 @@ _CONFIGS = [
         save_interval=500,
         keep_period=1_000,
     ),
+    TrainConfig(
+        name="pi05_franka_glass",
+        # Full-parameter pi0.5 fine-tuning using D455 as the base view and D405 as
+        # the second view. This requires multi-GPU FSDP; a single 32 GB GPU is not sufficient.
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=50,
+            discrete_state_input=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+        ),
+        data=SimpleDataConfig(
+            repo_id="prs/franka_glass_pi05_two_camera",
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[
+                    franka_policy.FrankaInputs(model_type=model.model_type),
+                    franka_policy.FrankaRelativeActions(),
+                ],
+                outputs=[
+                    franka_policy.FrankaAbsoluteActions(),
+                    franka_policy.FrankaOutputs(),
+                ],
+            ),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image": "image",
+                                "observation/wrist_image": "wrist_image",
+                                "observation/state": "state",
+                                "actions": "actions",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+            ),
+        ),
+        batch_size=8,
+        num_workers=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=250,
+            peak_lr=2.5e-5,
+            decay_steps=5_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        # EMA is not required for full fine-tuning and would add another full model copy in memory.
+        ema_decay=None,
+        num_train_steps=5_000,
+        save_interval=500,
+        keep_period=1_000,
+    ),
     #
     # Fine-tuning Aloha configs.
     #

@@ -28,10 +28,11 @@ def _parse_image(image) -> np.ndarray:
 
 @dataclasses.dataclass(frozen=True)
 class FrankaInputs(transforms.DataTransformFn):
-    """Inputs for a single-camera Franka absolute-pose policy.
+    """Inputs for a one- or two-camera Franka absolute-pose policy.
 
     Expected pre-repack keys:
       observation/image: RGB image
+      observation/wrist_image: optional second RGB camera
       observation/state: [x,y,z,rx,ry,rz,gripper]
       actions: [x,y,z,rx,ry,rz,gripper]
       prompt: language task
@@ -41,16 +42,20 @@ class FrankaInputs(transforms.DataTransformFn):
 
     def __call__(self, data: dict) -> dict:
         base_image = _parse_image(data["observation/image"])
+        has_wrist_image = "observation/wrist_image" in data
+        wrist_image = _parse_image(data["observation/wrist_image"]) if has_wrist_image else np.zeros_like(base_image)
+        if "observation/wrist_image_mask" in data:
+            has_wrist_image = bool(np.asarray(data["observation/wrist_image_mask"]).item())
 
         match self.model_type:
             case _model.ModelType.PI0 | _model.ModelType.PI05:
                 image_names = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
-                images = (base_image, np.zeros_like(base_image), np.zeros_like(base_image))
-                image_masks = (np.True_, np.False_, np.False_)
+                images = (base_image, wrist_image, np.zeros_like(base_image))
+                image_masks = (np.True_, np.bool_(has_wrist_image), np.False_)
             case _model.ModelType.PI0_FAST:
                 image_names = ("base_0_rgb", "base_1_rgb", "wrist_0_rgb")
-                images = (base_image, np.zeros_like(base_image), np.zeros_like(base_image))
-                image_masks = (np.True_, np.True_, np.True_)
+                images = (base_image, wrist_image, np.zeros_like(base_image))
+                image_masks = (np.True_, np.bool_(has_wrist_image), np.False_)
             case _:
                 raise ValueError(f"Unsupported model type: {self.model_type}")
 

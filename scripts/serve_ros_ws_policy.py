@@ -153,13 +153,22 @@ def build_policy_input(obs: dict[str, Any], args: Args) -> dict[str, Any]:
     state = ros_state_from_observation(obs, args.gripper_max_finger_width)
     image = decode_ros_image(obs["image"])
     image = image_tools.convert_to_uint8(image_tools.resize_with_pad(image, args.resize_size, args.resize_size))
+    has_wrist_image = "wrist_image" in obs
+    if has_wrist_image:
+        wrist_image = decode_ros_image(obs["wrist_image"])
+        wrist_image = image_tools.convert_to_uint8(
+            image_tools.resize_with_pad(wrist_image, args.resize_size, args.resize_size)
+        )
+    else:
+        wrist_image = np.zeros_like(image)
     prompt = str(obs.get("prompt") or args.default_prompt)
 
     match args.input_format:
         case PolicyInputFormat.LIBERO_SINGLE_IMAGE:
             return {
                 "observation/image": image,
-                "observation/wrist_image": np.zeros_like(image),
+                "observation/wrist_image": wrist_image,
+                "observation/wrist_image_mask": np.bool_(has_wrist_image),
                 "observation/state": state,
                 "prompt": prompt,
             }
@@ -167,12 +176,12 @@ def build_policy_input(obs: dict[str, Any], args: Args) -> dict[str, Any]:
             return {
                 "image": {
                     "base_0_rgb": image,
-                    "left_wrist_0_rgb": np.zeros_like(image),
+                    "left_wrist_0_rgb": wrist_image,
                     "right_wrist_0_rgb": np.zeros_like(image),
                 },
                 "image_mask": {
                     "base_0_rgb": np.True_,
-                    "left_wrist_0_rgb": np.False_,
+                    "left_wrist_0_rgb": np.bool_(has_wrist_image),
                     "right_wrist_0_rgb": np.False_,
                 },
                 "state": state,

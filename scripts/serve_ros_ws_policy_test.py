@@ -30,6 +30,22 @@ def test_gripper_width_uses_training_normalization():
     np.testing.assert_allclose(server.ros_state_from_observation(obs)[-1], 0.5)
 
 
+def test_build_policy_input_uses_second_camera_when_present():
+    obs = _observation()
+    obs["wrist_image"] = {
+        "height": 1,
+        "width": 1,
+        "step": 3,
+        "encoding": "rgb8",
+        "data_b64": base64.b64encode(bytes([10, 20, 30])).decode("ascii"),
+    }
+
+    policy_input = server.build_policy_input(obs, server.Args(resize_size=4))
+
+    assert policy_input["observation/wrist_image_mask"]
+    np.testing.assert_array_equal(policy_input["observation/wrist_image"], np.full((4, 4, 3), [10, 20, 30]))
+
+
 def test_gripper_normalization_clips_to_unit_interval():
     assert server.normalized_gripper_from_observation(_observation(gripper_width=-0.01), 0.04) == 0.0
     assert server.normalized_gripper_from_observation(_observation(gripper_width=0.05), 0.04) == 1.0

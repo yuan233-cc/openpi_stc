@@ -1,7 +1,29 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from openpi.models import model as _model
 from openpi.policies import franka_policy
+
+
+def test_franka_inputs_use_two_camera_slots():
+    base_image = np.zeros((16, 20, 3), dtype=np.uint8)
+    wrist_image = np.full((12, 18, 3), 127, dtype=np.uint8)
+
+    transformed = franka_policy.FrankaInputs(_model.ModelType.PI05)(
+        {
+            "observation/image": base_image,
+            "observation/wrist_image": wrist_image,
+            "observation/state": np.zeros(7),
+        }
+    )
+
+    np.testing.assert_array_equal(transformed["image"]["base_0_rgb"], base_image)
+    np.testing.assert_array_equal(transformed["image"]["left_wrist_0_rgb"], wrist_image)
+    assert transformed["image_mask"] == {
+        "base_0_rgb": np.True_,
+        "left_wrist_0_rgb": np.True_,
+        "right_wrist_0_rgb": np.False_,
+    }
 
 
 def test_relative_rotation_uses_short_path_across_rotvec_boundary():

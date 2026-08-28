@@ -1,10 +1,10 @@
-"""Convert the Franka sponge LeRobot dataset into an OpenPI pi0.5 training dataset.
+"""Convert a recorder-native Franka LeRobot dataset into an OpenPI pi0.5 dataset.
 
 The source dataset is already LeRobot v3, but its fields are recorder-native:
 
   observation.state = [x,y,z,qx,qy,qz,qw, wrench(6), gripper_0, gripper_1]
   action            = [x,y,z,qx,qy,qz,qw, gripper]
-  observation.images.base = video
+  observation.images.<camera> = video
 
 This script writes a new LeRobot dataset with the field names and dimensions used
 by OpenPI training:
@@ -28,6 +28,11 @@ Usage:
   uv run examples/franka/convert_franka_sponge_to_lerobot.py \
       --data-dir /home/prs/Yuan_Feng/data/raw_pick_up_sponge_42_action_next_state \
       --repo-id prs/franka_sponge_pi05
+
+When ``--image-key`` is omitted, the converter prefers
+``observation.images.base`` and then ``observation.images.d455``. If
+``observation.images.d405`` is also present, it is automatically written as the
+second ``wrist_image`` feature. Explicit keys can override either selection.
 """
 
 from __future__ import annotations
@@ -106,7 +111,7 @@ def _task_map(data_dir: Path) -> dict[int, str]:
     return {}
 
 
-def _iter_lowdim_episodes(data_dir: Path, *, batch_size: int = 512):
+def _iter_lowdim_episodes(data_dir: Path, *, batch_size: int = 512, default_task: str = "do something"):
     """Stream source Parquet and yield one episode at a time."""
     task_by_index = _task_map(data_dir)
     data_files = sorted((data_dir / "data").glob("chunk-*/file-*.parquet"))
@@ -142,7 +147,7 @@ def _iter_lowdim_episodes(data_dir: Path, *, batch_size: int = 512):
                         "frame_index": frame_index,
                         "state": np.asarray(row["observation.state"], dtype=np.float32),
                         "action": np.asarray(row["action"], dtype=np.float32),
-                        "task": task_by_index.get(int(row["task_index"]), "pick up the sponge"),
+                        "task": task_by_index.get(int(row["task_index"]), default_task),
                     }
                 )
 
@@ -169,6 +174,43 @@ def _dataset_info(data_dir: Path) -> dict:
         return json.load(f)
 
 
+def _resolve_image_key(info: dict, requested_key: str | None) -> str:
+    features = info.get("features", {})
+    video_keys = [key for key, feature in features.items() if feature.get("dtype") == "video"]
+
+    if requested_key is not None:
+        if requested_key not in video_keys:
+            raise ValueError(f"Image key {requested_key!r} is not a video feature; available video keys: {video_keys}")
+        return requested_key
+
+    for preferred_key in ("observation.images.base", "observation.images.d455"):
+        if preferred_key in video_keys:
+            return preferred_key
+    if len(video_keys) == 1:
+        return video_keys[0]
+    if not video_keys:
+        raise ValueError("Source dataset has no video features")
+    raise ValueError(f"Multiple video features found; select one with --image-key: {video_keys}")
+
+
+def _resolve_wrist_image_key(info: dict, primary_key: str, requested_key: str | None) -> str | None:
+    features = info.get("features", {})
+    video_keys = [key for key, feature in features.items() if feature.get("dtype") == "video"]
+
+    if requested_key is not None:
+        if requested_key not in video_keys:
+            raise ValueError(
+                f"Wrist image key {requested_key!r} is not a video feature; available video keys: {video_keys}"
+            )
+        if requested_key == primary_key:
+            raise ValueError("Primary and wrist image keys must be different")
+        return requested_key
+
+    if "observation.images.d405" in video_keys and primary_key != "observation.images.d405":
+        return "observation.images.d405"
+    return None
+
+
 def _iter_video_frames(data_dir: Path, image_key: str):
     video_root = data_dir / "videos" / image_key
     video_files = sorted(video_root.glob("chunk-*/file-*.mp4"))
@@ -184,20 +226,24 @@ def main(
     repo_id: str = "prs/franka_sponge_pi05",
     *,
     output_root: str | None = None,
-    image_key: str = "observation.images.base",
+    image_key: str | None = None,
+    wrist_image_key: str | None = None,
+    default_task: str = "pick up the sponge",
     image_writer_processes: int = 0,
     image_writer_threads: int = 10,
     max_frames: int | None = None,
     push_to_hub: bool = False,
     overwrite: bool = False,
 ) -> None:
-    """Convert the Franka sponge dataset.
+    """Convert a recorder-native Franka dataset.
 
     Args:
         data_dir: Source LeRobot dataset directory.
         repo_id: Output LeRobot repo id.  OpenPI configs refer to this id.
         output_root: Optional output root. Defaults to HF_LEROBOT_HOME / repo_id.
-        image_key: Source camera key.
+        image_key: Source camera key. If omitted, select a known main-camera key automatically.
+        wrist_image_key: Optional second camera key. D405 is selected automatically when available.
+        default_task: Prompt used only when the source task metadata has no matching task.
         image_writer_processes: Worker processes used to write temporary image frames.
         image_writer_threads: Image-writer threads per process, or total threads when processes is zero.
         max_frames: Optional smoke-test limit.  If set, conversion stops after
@@ -224,52 +270,71 @@ def main(
         shutil.rmtree(output_path)
 
     info = _dataset_info(data_path)
+    image_key = _resolve_image_key(info, image_key)
+    wrist_image_key = _resolve_wrist_image_key(info, image_key, wrist_image_key)
     height, width, channels = info["features"][image_key]["shape"]
+    features = {
+        "image": {
+            # Explicitly request video-backed storage. In LeRobot v2.1,
+            # use_videos=True does not change a manually declared "image"
+            # feature into a "video" feature.
+            "dtype": "video",
+            "shape": (height, width, channels),
+            "names": ["height", "width", "channel"],
+        },
+        "state": {
+            "dtype": "float32",
+            "shape": (7,),
+            "names": ["x", "y", "z", "rx", "ry", "rz", "gripper"],
+        },
+        "actions": {
+            "dtype": "float32",
+            "shape": (7,),
+            "names": ["x", "y", "z", "rx", "ry", "rz", "gripper"],
+        },
+    }
+    if wrist_image_key is not None:
+        wrist_height, wrist_width, wrist_channels = info["features"][wrist_image_key]["shape"]
+        features["wrist_image"] = {
+            "dtype": "video",
+            "shape": (wrist_height, wrist_width, wrist_channels),
+            "names": ["height", "width", "channel"],
+        }
+
     dataset = LeRobotDataset.create(
         repo_id=repo_id,
         root=output_path,
         robot_type="franka_fr3",
         fps=int(info["fps"]),
-        features={
-            "image": {
-                # Explicitly request video-backed storage. In LeRobot v2.1,
-                # use_videos=True does not change a manually declared "image"
-                # feature into a "video" feature.
-                "dtype": "video",
-                "shape": (height, width, channels),
-                "names": ["height", "width", "channel"],
-            },
-            "state": {
-                "dtype": "float32",
-                "shape": (7,),
-                "names": ["x", "y", "z", "rx", "ry", "rz", "gripper"],
-            },
-            "actions": {
-                "dtype": "float32",
-                "shape": (7,),
-                "names": ["x", "y", "z", "rx", "ry", "rz", "gripper"],
-            },
-        },
+        features=features,
         use_videos=True,
         image_writer_processes=image_writer_processes,
         image_writer_threads=image_writer_threads,
     )
-    if dataset.meta.video_keys != ["image"]:
-        raise RuntimeError(f"Expected a video-backed 'image' feature, got video keys {dataset.meta.video_keys}")
+    expected_video_keys = {"image"}
+    if wrist_image_key is not None:
+        expected_video_keys.add("wrist_image")
+    if set(dataset.meta.video_keys) != expected_video_keys:
+        raise RuntimeError(f"Expected video features {expected_video_keys}, got video keys {dataset.meta.video_keys}")
 
     print(f"source: {data_path} ({info['total_episodes']} episodes, {info['total_frames']} frames @ {info['fps']} fps)")
     print(f"output: {output_path}")
+    print(f"image key: {image_key} ({width}x{height}x{channels})")
+    if wrist_image_key is not None:
+        print(f"wrist image key: {wrist_image_key} ({wrist_width}x{wrist_height}x{wrist_channels})")
     print("actions=absolute recorded next state; quaternion rotations -> axis-angle")
     print(f"image writers={image_writer_processes} processes x {image_writer_threads} threads")
 
     expected_frames = int(info["total_frames"])
     expected_episodes = int(info["total_episodes"])
     target_frames = expected_frames if max_frames is None else min(max_frames, expected_frames)
-    video_frames = _iter_video_frames(data_path, image_key)
+    video_frames = {"image": _iter_video_frames(data_path, image_key)}
+    if wrist_image_key is not None:
+        video_frames["wrist_image"] = _iter_video_frames(data_path, wrist_image_key)
     seen_frames = 0
     seen_episodes = 0
     written_frames = 0
-    for episode in _iter_lowdim_episodes(data_path):
+    for episode in _iter_lowdim_episodes(data_path, default_task=default_task):
         _validate_next_state_actions(episode)
         seen_frames += len(episode)
         seen_episodes += 1
@@ -279,15 +344,17 @@ def main(
             break
         frames_to_write = episode[:remaining]
         for frame in frames_to_write:
-            try:
-                source_image = next(video_frames)
-            except StopIteration as exc:
-                raise RuntimeError(
-                    f"Video ended after {written_frames} frames, but {target_frames} are required"
-                ) from exc
+            source_images = {}
+            for output_key, frame_iterator in video_frames.items():
+                try:
+                    source_images[output_key] = _parse_image(next(frame_iterator))
+                except StopIteration as exc:
+                    raise RuntimeError(
+                        f"{output_key} video ended after {written_frames} frames, but {target_frames} are required"
+                    ) from exc
             dataset.add_frame(
                 {
-                    "image": _parse_image(source_image),
+                    **source_images,
                     "state": _state_to_openpi(frame["state"]),
                     "actions": _absolute_action_from_raw_action(frame["action"]),
                     "task": frame["task"],
@@ -315,7 +382,7 @@ def main(
         dataset.finalize()
 
     if push_to_hub:
-        dataset.push_to_hub(tags=["franka", "sponge", "pi05"], private=False, push_videos=True, license="apache-2.0")
+        dataset.push_to_hub(tags=["franka", "pi05"], private=False, push_videos=True, license="apache-2.0")
 
     print(f"done -> {output_path}")
     print(f"Use this repo id in OpenPI config: {repo_id}")
