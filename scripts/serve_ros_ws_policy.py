@@ -1,8 +1,8 @@
 """Serve the ROS WebSocket robot-control protocol.
 
 This server is the counterpart to the ROS 2 `robot_ws_client` package. It accepts
-JSON observations with a base64-encoded ROS Image and returns the complete
-policy action chunk as absolute target end-effector poses.
+JSON observations with base64-encoded D455 and D405 ROS Images and returns the
+complete policy action chunk as absolute target end-effector poses.
 
 The default mode is `hold`, which simply returns the current pose as the target
 pose. Use it first to test networking and image decoding before enabling policy
@@ -30,6 +30,14 @@ from openpi.policies import policy_config as _policy_config
 from openpi.training import config as _config
 
 logger = logging.getLogger(__name__)
+
+
+CAMERA_PAYLOAD_KEYS = {
+    # The first key in each tuple is the canonical recorder/dataset key. The
+    # remaining names keep older websocket clients compatible.
+    "d455": ("observation.images.d455", "d455", "image"),
+    "d405": ("observation.images.d405", "d405", "wrist_image"),
+}
 
 
 class Mode(enum.Enum):
@@ -97,6 +105,38 @@ def decode_ros_image(image_msg: dict[str, Any]) -> np.ndarray:
     return np.ascontiguousarray(img)
 
 
+def camera_payload_from_observation(
+    obs: dict[str, Any], camera_name: str, *, required: bool = True
+) -> dict[str, Any] | None:
+    """Resolve a camera payload from recorder-native and legacy websocket keys."""
+    try:
+        aliases = CAMERA_PAYLOAD_KEYS[camera_name]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported camera name: {camera_name}") from exc
+
+    for key in aliases:
+        if key in obs:
+            payload = obs[key]
+            if not isinstance(payload, dict):
+                raise ValueError(f"Camera payload {key!r} must be an object")
+            return payload
+
+    images = obs.get("images")
+    if isinstance(images, dict) and camera_name in images:
+        payload = images[camera_name]
+        if not isinstance(payload, dict):
+            raise ValueError(f"Camera payload images.{camera_name} must be an object")
+        return payload
+
+    if required:
+        accepted = ", ".join(repr(key) for key in aliases)
+        raise ValueError(
+            f"Observation is missing the {camera_name.upper()} camera; "
+            f"expected one of {accepted}, or 'images.{camera_name}'"
+        )
+    return None
+
+
 def quat_xyzw_to_rotvec(quat: np.ndarray) -> np.ndarray:
     """Convert an xyzw quaternion to a rotation vector without scipy."""
     quat = np.asarray(quat, dtype=np.float64)
@@ -151,11 +191,14 @@ def ros_state_from_observation(obs: dict[str, Any], gripper_max_finger_width: fl
 
 def build_policy_input(obs: dict[str, Any], args: Args) -> dict[str, Any]:
     state = ros_state_from_observation(obs, args.gripper_max_finger_width)
-    image = decode_ros_image(obs["image"])
+    d455_payload = camera_payload_from_observation(obs, "d455")
+    assert d455_payload is not None
+    image = decode_ros_image(d455_payload)
     image = image_tools.convert_to_uint8(image_tools.resize_with_pad(image, args.resize_size, args.resize_size))
-    has_wrist_image = "wrist_image" in obs
+    d405_payload = camera_payload_from_observation(obs, "d405", required=False)
+    has_wrist_image = d405_payload is not None
     if has_wrist_image:
-        wrist_image = decode_ros_image(obs["wrist_image"])
+        wrist_image = decode_ros_image(d405_payload)
         wrist_image = image_tools.convert_to_uint8(
             image_tools.resize_with_pad(wrist_image, args.resize_size, args.resize_size)
         )

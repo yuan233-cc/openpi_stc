@@ -98,24 +98,98 @@ ln -s /home/prs/Yuan_Feng/data/franka_glass_pi05_two_camera \
   ~/.cache/huggingface/lerobot/prs/franka_glass_pi05_two_camera
 ```
 
-Then compute statistics and train with the glass-specific full-parameter pi0.5
-config. The 3.35B-parameter model does not fit full AdamW training on one 32 GB
-GPU; use FSDP across multiple GPUs (for example, four 32 GB GPUs):
+Then compute statistics and train with the glass-specific pi0.5 LoRA config. It
+uses LoRA for both the 2B language backbone and the 300M action expert and fits
+on one 32 GB GPU:
 
 ```bash
 uv run scripts/compute_norm_stats.py --config-name pi05_franka_glass
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py \
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py \
   pi05_franka_glass \
-  --exp-name=pick_up_glass_full \
-  --fsdp-devices=4 \
+  --exp-name=pick_up_glass_lora \
   --no-wandb-enabled
 ```
 
-Adjust `CUDA_VISIBLE_DEVICES` and `--fsdp-devices` together for the available
-multi-GPU machine. The global batch size is 8 and must be divisible by the total
-number of visible devices.
-
 At inference time, the ROS websocket observation must likewise provide both
-encoded image messages: `image` for D455 and `wrist_image` for D405. The server
-maps them to the same two model slots used during training.
+encoded image messages using the recorder keys: `observation.images.d455` and
+`observation.images.d405`. The server maps them to the same two model slots used
+during training. For compatibility, it also accepts `d455`/`d405`, nested
+`images.d455`/`images.d405`, and the legacy `image`/`wrist_image` keys.
+
+### Strict 101-episode glass dataset
+
+This dataset stores continuous measured finger widths in `observation.state`
+and explicit binary open/close labels in the action gripper dimension. Convert
+it without changing those command labels:
+
+```bash
+uv run examples/franka/convert_franka_sponge_to_lerobot.py \
+  --data-dir /home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_glass_101ep_merged_cropped_fixed_action_raw_gripper_15hz_strict_20260828 \
+  --repo-id prs/franka_glass_101ep_pi05_two_camera_15hz \
+  --output-root /home/prs/Yuan_Feng/data/franka_glass_101ep_pi05_two_camera_15hz \
+  --gripper-action-mode binary_command \
+  --default-task "pick up the glass"
+```
+
+The training CLI accepts the converted directory directly; a Hugging Face cache
+symlink is not required. This is also the recommended way to train after copying
+or downloading the dataset onto another computer:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py \
+  pi05_franka_glass_101ep \
+  --data.dataset-root=/path/to/franka_glass_101ep_pi05_two_camera_15hz \
+  --exp-name=pick_up_glass_101ep_full \
+  --fsdp-devices=4
+```
+
+The local directory must be the dataset root containing `meta/`, `data/`, and
+`videos/`. The `pi05_franka_glass_101ep` config loads its matching norm stats
+through OpenPI's standard config asset directory,
+`assets/pi05_franka_glass_101ep/prs/franka_glass_101ep_pi05_two_camera/norm_stats.json`.
+The root `assets/` directory is tracked, so no machine-specific asset path or
+additional norm-stat computation is needed after cloning the repository.
+If `--data.dataset-root` is omitted, the original repo-id/cache lookup remains
+available.
+
+For example, if the dataset is copied to `/data/openpi_datasets` on the other
+computer, use:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py \
+  pi05_franka_glass_101ep \
+  --data.dataset-root=/data/openpi_datasets/franka_glass_101ep_pi05_two_camera_15hz \
+  --exp-name=pick_up_glass_101ep_full \
+  --fsdp-devices=4
+```
+
+This 15 Hz config updates all pi0.5 parameters and does not use LoRA or a
+freeze filter. Full-parameter AdamW training usually needs multiple GPUs; set
+`CUDA_VISIBLE_DEVICES` and `--fsdp-devices` to match the available machine. The
+global batch size is 16 and must be divisible by the number of visible devices.
+
+### Strict 101-episode glass dataset at 30 Hz
+
+The full-rate dataset uses the same continuous measured gripper state and binary
+gripper command convention. Its output repo id and directory explicitly include
+`30hz`:
+
+```bash
+uv run examples/franka/convert_franka_sponge_to_lerobot.py \
+  --data-dir /home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_glass_101ep_merged_cropped_fixed_action_raw_gripper_20260828 \
+  --repo-id prs/franka_glass_101ep_pi05_two_camera_30hz \
+  --output-root /home/prs/Yuan_Feng/data/franka_glass_101ep_pi05_two_camera_30hz \
+  --gripper-action-mode binary_command \
+  --default-task "pick up the glass"
+```
+
+`pi05_franka_glass_101ep_30hz` explicitly reuses the same tracked norm stats, so
+do not run `compute_norm_stats.py` again. Train with:
+
+```bash
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py \
+  pi05_franka_glass_101ep_30hz \
+  --data.dataset-root=/path/to/franka_glass_101ep_pi05_two_camera_30hz \
+  --exp-name=pick_up_glass_101ep_30hz_lora
+```

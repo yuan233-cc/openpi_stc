@@ -14,9 +14,11 @@ by OpenPI training:
   actions = [x,y,z,rx,ry,rz,gripper]                  absolute next pose
 
 Raw rotations are quaternions and are converted to axis-angle. The source
-``action`` field is an absolute next state, which the converter verifies and
-stores without converting it to a delta. During training, OpenPI constructs an
-action chunk and expresses every pose relative to the chunk's initial observation:
+``action`` pose is an absolute next state, which the converter verifies and
+stores without converting it to a delta. The gripper action can either be the
+next measured width used by older datasets or an explicit binary open/close
+command. During training, OpenPI constructs an action chunk and expresses every
+pose relative to the chunk's initial observation:
 
   delta_position = target_position - current_position
   delta_rotation = Log(inverse(R_current) @ R_target)
@@ -40,6 +42,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import shutil
+from typing import Literal
 
 import einops
 import imageio.v3 as iio
@@ -155,17 +158,40 @@ def _iter_lowdim_episodes(data_dir: Path, *, batch_size: int = 512, default_task
         yield episode_frames
 
 
-def _validate_next_state_actions(frames: list[dict], *, atol: float = 1e-6) -> None:
-    """Check that action[t] is the next state, including the normalized gripper."""
+def _validate_next_state_actions(
+    frames: list[dict],
+    *,
+    gripper_action_mode: Literal["next_state", "binary_command"] = "next_state",
+    atol: float = 1e-6,
+) -> None:
+    """Check that the pose action is the next state and validate its gripper label."""
     for index, frame in enumerate(frames):
         is_terminal = index + 1 == len(frames) or frame["episode"] != frames[index + 1]["episode"]
         target_state = frame["state"] if is_terminal else frames[index + 1]["state"]
-        expected = np.concatenate([target_state[:7], [_gripper_from_raw_state(target_state)]])
-        if not np.allclose(frame["action"], expected, rtol=0.0, atol=atol):
-            max_error = float(np.max(np.abs(frame["action"] - expected)))
+        action = np.asarray(frame["action"], dtype=np.float32)
+        if action.shape != (8,):
+            raise ValueError(f"Episode {frame['episode']} frame {index} has action shape {action.shape}; expected (8,)")
+        if not np.all(np.isfinite(action)):
+            raise ValueError(f"Episode {frame['episode']} frame {index} has non-finite action values")
+
+        if not np.allclose(action[:7], target_state[:7], rtol=0.0, atol=atol):
+            max_error = float(np.max(np.abs(action[:7] - target_state[:7])))
             raise ValueError(
-                f"Episode {frame['episode']} frame {index} action is not the next state (max error {max_error:.3g}); "
-                "this converter only supports the action_next_state recording format."
+                f"Episode {frame['episode']} frame {index} pose action is not the next state "
+                f"(max error {max_error:.3g}); this converter only supports action_next_state poses."
+            )
+
+        if gripper_action_mode == "next_state":
+            expected_gripper = _gripper_from_raw_state(target_state)
+            if not np.isclose(action[7], expected_gripper, rtol=0.0, atol=atol):
+                raise ValueError(
+                    f"Episode {frame['episode']} frame {index} gripper action {action[7]:.6g} "
+                    f"does not match next-state gripper {expected_gripper:.6g}; use "
+                    "--gripper-action-mode binary_command only for datasets with explicit 0/1 commands."
+                )
+        elif not (np.isclose(action[7], 0.0, rtol=0.0, atol=atol) or np.isclose(action[7], 1.0, rtol=0.0, atol=atol)):
+            raise ValueError(
+                f"Episode {frame['episode']} frame {index} binary gripper command must be 0 or 1, got {action[7]:.6g}"
             )
 
 
@@ -228,6 +254,7 @@ def main(
     output_root: str | None = None,
     image_key: str | None = None,
     wrist_image_key: str | None = None,
+    gripper_action_mode: Literal["next_state", "binary_command"] = "next_state",
     default_task: str = "pick up the sponge",
     image_writer_processes: int = 0,
     image_writer_threads: int = 10,
@@ -243,6 +270,8 @@ def main(
         output_root: Optional output root. Defaults to HF_LEROBOT_HOME / repo_id.
         image_key: Source camera key. If omitted, select a known main-camera key automatically.
         wrist_image_key: Optional second camera key. D405 is selected automatically when available.
+        gripper_action_mode: ``next_state`` verifies the action gripper against the next measured state;
+            ``binary_command`` preserves and validates explicit 0/1 open/close command labels.
         default_task: Prompt used only when the source task metadata has no matching task.
         image_writer_processes: Worker processes used to write temporary image frames.
         image_writer_threads: Image-writer threads per process, or total threads when processes is zero.
@@ -322,7 +351,9 @@ def main(
     print(f"image key: {image_key} ({width}x{height}x{channels})")
     if wrist_image_key is not None:
         print(f"wrist image key: {wrist_image_key} ({wrist_width}x{wrist_height}x{wrist_channels})")
-    print("actions=absolute recorded next state; quaternion rotations -> axis-angle")
+    print(
+        f"actions=absolute recorded next-state pose; gripper={gripper_action_mode}; quaternion rotations -> axis-angle"
+    )
     print(f"image writers={image_writer_processes} processes x {image_writer_threads} threads")
 
     expected_frames = int(info["total_frames"])
@@ -335,7 +366,7 @@ def main(
     seen_episodes = 0
     written_frames = 0
     for episode in _iter_lowdim_episodes(data_path, default_task=default_task):
-        _validate_next_state_actions(episode)
+        _validate_next_state_actions(episode, gripper_action_mode=gripper_action_mode)
         seen_frames += len(episode)
         seen_episodes += 1
 

@@ -13,7 +13,7 @@ def _observation(*, gripper_width: float = 0.02) -> dict:
         "seq": 7,
         "ee_pose": [0.4, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0],
         "gripper_width": gripper_width,
-        "image": {
+        "observation.images.d455": {
             "height": 1,
             "width": 1,
             "step": 3,
@@ -32,7 +32,7 @@ def test_gripper_width_uses_training_normalization():
 
 def test_build_policy_input_uses_second_camera_when_present():
     obs = _observation()
-    obs["wrist_image"] = {
+    obs["observation.images.d405"] = {
         "height": 1,
         "width": 1,
         "step": 3,
@@ -44,6 +44,43 @@ def test_build_policy_input_uses_second_camera_when_present():
 
     assert policy_input["observation/wrist_image_mask"]
     np.testing.assert_array_equal(policy_input["observation/wrist_image"], np.full((4, 4, 3), [10, 20, 30]))
+
+
+def test_build_policy_input_accepts_legacy_camera_keys():
+    obs = _observation()
+    obs["image"] = obs.pop("observation.images.d455")
+    obs["wrist_image"] = {
+        "height": 1,
+        "width": 1,
+        "step": 3,
+        "encoding": "rgb8",
+        "data_b64": base64.b64encode(bytes([40, 50, 60])).decode("ascii"),
+    }
+
+    policy_input = server.build_policy_input(obs, server.Args(resize_size=4))
+
+    assert policy_input["observation/wrist_image_mask"]
+    np.testing.assert_array_equal(policy_input["observation/wrist_image"], np.full((4, 4, 3), [40, 50, 60]))
+
+
+def test_build_policy_input_accepts_nested_camera_keys():
+    obs = _observation()
+    d455 = obs.pop("observation.images.d455")
+    obs["images"] = {
+        "d455": d455,
+        "d405": {
+            "height": 1,
+            "width": 1,
+            "step": 3,
+            "encoding": "rgb8",
+            "data_b64": base64.b64encode(bytes([70, 80, 90])).decode("ascii"),
+        },
+    }
+
+    policy_input = server.build_policy_input(obs, server.Args(resize_size=4))
+
+    assert policy_input["observation/wrist_image_mask"]
+    np.testing.assert_array_equal(policy_input["observation/wrist_image"], np.full((4, 4, 3), [70, 80, 90]))
 
 
 def test_gripper_normalization_clips_to_unit_interval():
