@@ -941,19 +941,21 @@ _CONFIGS = [
                 prompt_from_task=True,
             ),
         ),
-        batch_size=16,
+        # Full fine-tuning baseline for the 43,783-frame dataset. This follows
+        # OpenPI's small-dataset full-tuning recipe when memory is not constrained.
+        batch_size=64,
         num_workers=4,
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=750,
-            peak_lr=5e-5,
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
             decay_steps=15_000,
-            decay_lr=5e-6,
+            decay_lr=2.5e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        ema_decay=None,
+        ema_decay=0.99,
         num_train_steps=15_000,
-        save_interval=1_500,
+        save_interval=1_000,
         keep_period=3_000,
     ),
     TrainConfig(

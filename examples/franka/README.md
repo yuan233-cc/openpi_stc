@@ -164,10 +164,12 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/t
   --fsdp-devices=4
 ```
 
-This 15 Hz config updates all pi0.5 parameters and does not use LoRA or a
-freeze filter. Full-parameter AdamW training usually needs multiple GPUs; set
+This 15 Hz config updates all pi0.5 parameters, does not use LoRA or a freeze
+filter, and maintains an EMA copy with decay `0.99`. It uses a global batch size
+of 64, 1,000 warmup steps, and cosine decay from `2.5e-5` to `2.5e-6` over
+15,000 steps. Full-parameter AdamW plus EMA requires high-memory GPUs; set
 `CUDA_VISIBLE_DEVICES` and `--fsdp-devices` to match the available machine. The
-global batch size is 16 and must be divisible by the number of visible devices.
+global batch size must be divisible by the number of visible devices.
 
 ### Strict 101-episode glass dataset at 30 Hz
 
