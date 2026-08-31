@@ -208,26 +208,48 @@ global batch size must be divisible by the number of visible devices.
 ### Put two small glasses, strict 15 Hz
 
 The `pi05_put_two_smallglass_15hz_full` config performs full-parameter pi0.5
-fine-tuning with EMA (`0.99`) on the 45-episode, two-camera dataset. Its repo id
+fine-tuning with EMA (`0.99`) on the 117-episode, two-camera dataset. Its repo id
 is `yuan1119/put_two_smallglass_15hz`, and its matching quantile normalization
 statistics are tracked in the config's standard assets directory. After cloning
 this repository, no `--data.repo-id` or `--data.assets.*` overrides are needed.
 
 Download `data.zip` from the dataset repository and extract it so that the
-selected dataset root directly contains `meta/`, `data/`, and `videos/`. For a
-four-GPU training host, run:
+selected dataset root directly contains `meta/`, `data/`, and `videos/`. The
+config defaults target two FSDP GPUs with a global batch of 128 (64 per GPU), so
+run:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py \
+CUDA_VISIBLE_DEVICES=0,1 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py \
   pi05_put_two_smallglass_15hz_full \
-  --data.dataset-root=/path/to/put_two_smallglass_15hz \
-  --exp-name=put_two_smallglass_15hz_full \
-  --fsdp-devices=4
+  --data.dataset-root=/path/to/put_two_samllglass_117ep_15hz \
+  --exp-name=put_two_samllglass_117ep_15hz_full
 ```
 
-The global batch size is 64 and must be divisible by the number of FSDP
-devices. Change both `CUDA_VISIBLE_DEVICES` and `--fsdp-devices` together when
-using a different number of GPUs.
+Compared with the previous global-batch-64 recipe, the two-GPU profile uses a
+global batch of 128 (64 per GPU). Its peak learning rate is linearly scaled to
+`5e-5`, with a 500-step warmup and 15,000 total training steps. Checkpoints are
+saved every 5,000 steps and at the final step. This is a memory-intensive
+full-parameter configuration; reduce the batch only if the target GPUs run out
+of memory.
+
+Run ROS WebSocket inference with the downloaded 3,000-step checkpoint:
+
+```bash
+cd /home/prs/Yuan_Feng/workspace/openpi
+
+CUDA_VISIBLE_DEVICES=0 \
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+uv run scripts/serve_ros_ws_policy.py \
+  --mode POLICY \
+  --default-prompt "pick up the glass and put it into the container" \
+  --input-format LIBERO_SINGLE_IMAGE \
+  --action-format ABSOLUTE_ROTVEC \
+  --host 0.0.0.0 \
+  --port 8765 \
+  policy:checkpoint \
+  --policy.config=pi05_put_two_smallglass_15hz_full \
+  --policy.dir=/home/prs/Yuan_Feng/workspace/openpi/checkpoints/pick_two_small_3000_50
+```
 
 ### Strict 101-episode glass dataset at 30 Hz
 

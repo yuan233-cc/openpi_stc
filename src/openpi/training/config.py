@@ -960,10 +960,10 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_put_two_smallglass_15hz_full",
-        # Full-parameter fine-tuning for the 45-episode, two-camera, strict
-        # 15 Hz dataset. Its repo id also selects the matching tracked norm
-        # stats automatically, so only --data.dataset-root is needed when the
-        # dataset is stored outside the Hugging Face cache.
+        # Full-parameter fine-tuning for the 117-episode, two-camera, strict
+        # 15 Hz dataset. This profile targets two FSDP GPUs. Its repo id keeps
+        # selecting the matching tracked norm stats, so only
+        # --data.dataset-root is needed when the dataset is stored elsewhere.
         model=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=50,
@@ -1000,20 +1000,24 @@ _CONFIGS = [
                 prompt_from_task=True,
             ),
         ),
-        batch_size=64,
+        # Global batch 128 gives each of two GPUs 64 samples.
+        batch_size=128,
         num_workers=4,
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1_000,
-            peak_lr=2.5e-5,
+            # Scale LR linearly from the global-batch-64 recipe. Keep a short
+            # 500-step warmup, then decay across the full 15,000-step run.
+            warmup_steps=500,
+            peak_lr=5e-5,
             decay_steps=15_000,
-            decay_lr=2.5e-6,
+            decay_lr=5e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         ema_decay=0.99,
         num_train_steps=15_000,
-        save_interval=1_000,
-        keep_period=3_000,
+        save_interval=5_000,
+        keep_period=5_000,
+        fsdp_devices=2,
     ),
     TrainConfig(
         name="pi05_franka_glass_101ep_30hz",
