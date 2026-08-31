@@ -117,6 +117,40 @@ encoded image messages using the recorder keys: `observation.images.d455` and
 during training. For compatibility, it also accepts `d455`/`d405`, nested
 `images.d455`/`images.d405`, and the legacy `image`/`wrist_image` keys.
 
+To see the OpenPI action curves without printing action values in the terminal,
+start `scripts/serve_ros_ws_policy.py` with `--plot-action-values`. The server
+renders the seven policy dimensions (`x`, `y`, `z`, `rx`, `ry`, `rz`, and
+`gripper`) over the complete chunk horizon and updates a browser dashboard after
+every inference. Plotting runs in a background worker and drops stale plot jobs
+rather than delaying robot inference.
+
+The option is disabled by default. For example:
+
+```bash
+uv run python scripts/serve_ros_ws_policy.py \
+  --mode POLICY \
+  --action-format ABSOLUTE_ROTVEC \
+  --plot-action-values \
+  --action-plot-host 127.0.0.1 \
+  --action-plot-port 8766 \
+  --host 0.0.0.0 \
+  --port 8765 \
+  policy:checkpoint \
+  --policy.config=<config-name> \
+  --policy.dir=<checkpoint-path>
+```
+
+Open <http://127.0.0.1:8766> in a browser. If OpenPI runs on another machine,
+forward the dashboard port first:
+
+```bash
+ssh -L 8766:127.0.0.1:8766 user@openpi-server
+```
+
+Then open the same local browser URL. The latest PNG and HTML page are also
+stored in `/tmp/openpi_action_curves` by default; change this with
+`--action-plot-dir`.
+
 ### Strict 101-episode glass dataset
 
 This dataset stores continuous measured finger widths in `observation.state`
@@ -170,6 +204,30 @@ of 64, 1,000 warmup steps, and cosine decay from `2.5e-5` to `2.5e-6` over
 15,000 steps. Full-parameter AdamW plus EMA requires high-memory GPUs; set
 `CUDA_VISIBLE_DEVICES` and `--fsdp-devices` to match the available machine. The
 global batch size must be divisible by the number of visible devices.
+
+### Put two small glasses, strict 15 Hz
+
+The `pi05_put_two_smallglass_15hz_full` config performs full-parameter pi0.5
+fine-tuning with EMA (`0.99`) on the 45-episode, two-camera dataset. Its repo id
+is `yuan1119/put_two_smallglass_15hz`, and its matching quantile normalization
+statistics are tracked in the config's standard assets directory. After cloning
+this repository, no `--data.repo-id` or `--data.assets.*` overrides are needed.
+
+Download `data.zip` from the dataset repository and extract it so that the
+selected dataset root directly contains `meta/`, `data/`, and `videos/`. For a
+four-GPU training host, run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py \
+  pi05_put_two_smallglass_15hz_full \
+  --data.dataset-root=/path/to/put_two_smallglass_15hz \
+  --exp-name=put_two_smallglass_15hz_full \
+  --fsdp-devices=4
+```
+
+The global batch size is 64 and must be divisible by the number of FSDP
+devices. Change both `CUDA_VISIBLE_DEVICES` and `--fsdp-devices` together when
+using a different number of GPUs.
 
 ### Strict 101-episode glass dataset at 30 Hz
 

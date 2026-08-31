@@ -15,9 +15,15 @@ import asyncio
 import base64
 import dataclasses
 import enum
+import functools
+import http.server
 import json
 import logging
 import math
+import os
+from pathlib import Path
+import queue
+import threading
 from typing import Any
 
 import numpy as np
@@ -85,6 +91,131 @@ class Args:
 
     # If true, any policy/inference error returns a hold action instead of closing the websocket.
     hold_on_error: bool = True
+    # Render policy action chunks as a browser dashboard without blocking inference.
+    plot_action_values: bool = False
+    action_plot_dir: str = "/tmp/openpi_action_curves"
+    action_plot_host: str = "127.0.0.1"
+    action_plot_port: int = 8766
+
+
+ACTION_NAMES = ("x", "y", "z", "rx", "ry", "rz", "gripper")
+
+
+class _DashboardRequestHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, format: str, *args: Any) -> None:
+        """Keep browser refresh requests out of the inference terminal."""
+
+    def end_headers(self) -> None:
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        super().end_headers()
+
+
+def render_action_curves(actions: np.ndarray, seq: Any, output_path: Path) -> None:
+    """Render one complete OpenPI action chunk to a PNG using a headless backend."""
+    import matplotlib as mpl
+
+    mpl.use("Agg")
+    import matplotlib.pyplot as plt
+
+    values = np.asarray(actions, dtype=np.float64)
+    if values.ndim != 2 or values.shape[0] == 0 or values.shape[1] < len(ACTION_NAMES):
+        raise ValueError(f"Expected non-empty action array [horizon, >=7], got {values.shape}")
+
+    steps = np.arange(values.shape[0])
+    figure, axes = plt.subplots(4, 2, figsize=(13, 11), sharex=True)
+    flat_axes = axes.reshape(-1)
+    colors = ("tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple", "tab:brown", "tab:pink")
+    try:
+        for index, (name, color) in enumerate(zip(ACTION_NAMES, colors, strict=True)):
+            axis = flat_axes[index]
+            axis.plot(steps, values[:, index], color=color, linewidth=2.0, marker=".", markersize=4)
+            axis.set_title(name)
+            axis.set_ylabel("value")
+            axis.grid(visible=True, alpha=0.3)
+            if name == "gripper":
+                axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.4)
+                axis.axhline(1.0, color="black", linewidth=0.8, alpha=0.4)
+        flat_axes[-1].set_visible(False)
+        for axis in flat_axes[-2:]:
+            axis.set_xlabel("chunk step")
+        figure.suptitle(f"OpenPI action curves — seq={seq}, horizon={values.shape[0]}")
+        figure.tight_layout(rect=(0, 0, 1, 0.97))
+
+        temporary_path = output_path.with_suffix(".tmp.png")
+        figure.savefig(temporary_path, format="png", dpi=140)
+        os.replace(temporary_path, output_path)
+    finally:
+        plt.close(figure)
+
+
+class ActionCurveDashboard:
+    """Render only the newest action chunk and serve it as an auto-refreshing page."""
+
+    def __init__(self, output_dir: str | Path, host: str, port: int):
+        if not 0 <= port <= 65535:
+            raise ValueError("action_plot_port must be between 0 and 65535")
+        self.output_dir = Path(output_dir).expanduser().resolve()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.image_path = self.output_dir / "action_curves.png"
+        self.html_path = self.output_dir / "index.html"
+        self.html_path.write_text(
+            """<!doctype html>
+<html><head><meta charset="utf-8"><title>OpenPI action curves</title>
+<style>body{margin:0;background:#111;color:#eee;font-family:sans-serif;text-align:center}
+h2{margin:12px}img{max-width:98vw;max-height:92vh;background:white}</style></head>
+<body><h2>Live OpenPI action chunk</h2><img id="plot" alt="Waiting for the first inference...">
+<script>const plot=document.getElementById('plot');
+function refresh(){plot.src='action_curves.png?t='+Date.now();}
+refresh();setInterval(refresh,500);</script></body></html>\n""",
+            encoding="utf-8",
+        )
+
+        handler = functools.partial(_DashboardRequestHandler, directory=str(self.output_dir))
+        self._http_server = http.server.ThreadingHTTPServer((host, port), handler)
+        actual_port = int(self._http_server.server_address[1])
+        display_host = "127.0.0.1" if host in ("", "0.0.0.0") else host
+        self.url = f"http://{display_host}:{actual_port}/"
+        self._http_thread = threading.Thread(target=self._http_server.serve_forever, daemon=True)
+        self._http_thread.start()
+
+        self._queue: queue.Queue[tuple[Any, np.ndarray] | None] = queue.Queue(maxsize=1)
+        self._render_thread = threading.Thread(target=self._render_loop, daemon=True)
+        self._render_thread.start()
+
+    def submit(self, seq: Any, actions: np.ndarray) -> None:
+        item = (seq, np.asarray(actions).copy())
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            # Plotting must never delay inference. Drop a stale, not-yet-rendered chunk.
+            try:
+                self._queue.get_nowait()
+                self._queue.task_done()
+            except queue.Empty:
+                pass
+            self._queue.put_nowait(item)
+
+    def _render_loop(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                self._queue.task_done()
+                return
+            seq, actions = item
+            try:
+                render_action_curves(actions, seq, self.image_path)
+            except Exception:
+                logger.exception("failed to update the OpenPI action curve dashboard")
+            finally:
+                self._queue.task_done()
+
+    def close(self) -> None:
+        self._queue.join()
+        self._queue.put(None)
+        self._render_thread.join(timeout=5.0)
+        self._http_server.shutdown()
+        self._http_server.server_close()
+        self._http_thread.join(timeout=2.0)
 
 
 def decode_ros_image(image_msg: dict[str, Any]) -> np.ndarray:
@@ -270,11 +401,22 @@ class RosWsPolicyServer:
     def __init__(self, args: Args):
         self._args = args
         self._policy = create_policy(args) if args.mode == Mode.POLICY else None
+        self._action_dashboard = (
+            ActionCurveDashboard(args.action_plot_dir, args.action_plot_host, args.action_plot_port)
+            if args.plot_action_values
+            else None
+        )
+        if self._action_dashboard is not None:
+            logger.info("OpenPI action curve dashboard: %s", self._action_dashboard.url)
 
     async def run(self) -> None:
-        async with _server.serve(self._handler, self._args.host, self._args.port, max_size=None):
-            logger.info("ROS WebSocket server listening on ws://%s:%d", self._args.host, self._args.port)
-            await asyncio.Future()
+        try:
+            async with _server.serve(self._handler, self._args.host, self._args.port, max_size=None):
+                logger.info("ROS WebSocket server listening on ws://%s:%d", self._args.host, self._args.port)
+                await asyncio.Future()
+        finally:
+            if self._action_dashboard is not None:
+                self._action_dashboard.close()
 
     async def _handler(self, websocket: _server.ServerConnection) -> None:
         logger.info("connection from %s opened", websocket.remote_address)
@@ -349,6 +491,9 @@ class RosWsPolicyServer:
             }
             for action in actions
         ]
+        action_dashboard = getattr(self, "_action_dashboard", None)
+        if action_dashboard is not None:
+            action_dashboard.submit(obs.get("seq"), actions)
         logger.info("inference seq=%s produced %d actions", obs.get("seq"), len(action_chunk))
         return action_chunk
 

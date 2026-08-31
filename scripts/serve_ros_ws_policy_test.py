@@ -134,6 +134,45 @@ def test_policy_output_accepts_single_action_as_one_step_chunk():
     assert actions[0]["gripper"] == 0.4
 
 
+def test_optional_action_curve_dashboard_receives_policy_output():
+    class FakePolicy:
+        def infer(self, _inputs):
+            return {"actions": np.array([[0.5, 0.1, 0.2, 0.0, 0.0, 0.0, 0.4]])}
+
+    policy_server = object.__new__(server.RosWsPolicyServer)
+    policy_server._args = server.Args(mode=server.Mode.POLICY)  # noqa: SLF001
+    policy_server._policy = FakePolicy()  # noqa: SLF001
+
+    class FakeDashboard:
+        def __init__(self):
+            self.submitted = []
+
+        def submit(self, seq, actions):
+            self.submitted.append((seq, actions.copy()))
+
+    dashboard = FakeDashboard()
+    policy_server._action_dashboard = dashboard  # noqa: SLF001
+
+    policy_server._infer_action(_observation())  # noqa: SLF001
+
+    assert len(dashboard.submitted) == 1
+    assert dashboard.submitted[0][0] == 7
+    np.testing.assert_allclose(dashboard.submitted[0][1], [[0.5, 0.1, 0.2, 0.0, 0.0, 0.0, 0.4]])
+
+
+def test_action_curve_dashboard_writes_live_page_and_plot(tmp_path):
+    dashboard = server.ActionCurveDashboard(tmp_path, "127.0.0.1", 0)
+    actions = np.linspace(0.0, 1.0, 50 * 7).reshape(50, 7)
+
+    dashboard.submit(12, actions)
+    dashboard.close()
+
+    assert dashboard.html_path.exists()
+    assert "setInterval(refresh,500)" in dashboard.html_path.read_text()
+    assert dashboard.image_path.exists()
+    assert dashboard.image_path.stat().st_size > 0
+
+
 def test_websocket_response_uses_action_chunk_protocol():
     class FakeWebSocket:
         remote_address = ("test", 0)
