@@ -1078,6 +1078,70 @@ _CONFIGS = [
         fsdp_devices=2,
     ),
     TrainConfig(
+        name="pi05_pick_small_glass_lucid_30hz_raw_gripper",
+        # One-GPU LoRA fine-tuning for the merged 50-episode Lucid + D405
+        # dataset. The source 30 Hz rate is preserved and the gripper action is
+        # the recorder's binary 0/1 command. Tracked norm stats are selected by
+        # repo id, so a copied dataset only needs --data.dataset-root.
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=50,
+            discrete_state_input=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=SimpleDataConfig(
+            repo_id="yuan1119/pick_the_small_glass_lucid_50ep_30hz_raw_gripper",
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[
+                    franka_policy.FrankaInputs(model_type=model.model_type),
+                    franka_policy.FrankaRelativeActions(),
+                ],
+                outputs=[
+                    franka_policy.FrankaAbsoluteActions(),
+                    franka_policy.FrankaOutputs(),
+                ],
+            ),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image": "image",
+                                "observation/wrist_image": "wrist_image",
+                                "observation/state": "state",
+                                "actions": "actions",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+            ),
+        ),
+        batch_size=16,
+        num_workers=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=750,
+            peak_lr=5e-5,
+            decay_steps=15_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=50,
+            discrete_state_input=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_train_steps=15_000,
+        save_interval=1_500,
+        keep_period=3_000,
+    ),
+    TrainConfig(
         name="pi05_franka_glass_101ep_30hz",
         # The 30 Hz version uses the same robot/state/action conventions and
         # intentionally reuses the norm stats computed for the strict 15 Hz dataset.
