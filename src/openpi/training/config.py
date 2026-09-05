@@ -1123,9 +1123,9 @@ _CONFIGS = [
         num_workers=4,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=750,
-            peak_lr=1e-4,
+            peak_lr=5e-5,
             decay_steps=15_000,
-            decay_lr=1e-5,
+            decay_lr=5e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
