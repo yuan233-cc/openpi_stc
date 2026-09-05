@@ -1079,16 +1079,16 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_pick_small_glass_lucid_30hz_raw_gripper",
-        # One-GPU LoRA fine-tuning for the merged 50-episode Lucid + D405
+        # Full-parameter fine-tuning for the merged 50-episode Lucid + D405
         # dataset. The source 30 Hz rate is preserved and the gripper action is
-        # the recorder's binary 0/1 command. Tracked norm stats are selected by
-        # repo id, so a copied dataset only needs --data.dataset-root.
+        # the recorder's binary 0/1 command. This follows the raw-gripper full
+        # tuning setup, with a global batch of 64 on one GPU.
         model=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=50,
             discrete_state_input=True,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
         ),
         data=SimpleDataConfig(
             repo_id="yuan1119/pick_the_small_glass_lucid_50ep_30hz_raw_gripper",
@@ -1119,7 +1119,7 @@ _CONFIGS = [
                 prompt_from_task=True,
             ),
         ),
-        batch_size=16,
+        batch_size=64,
         num_workers=4,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=750,
@@ -1129,17 +1129,11 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        freeze_filter=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=50,
-            discrete_state_input=True,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ).get_freeze_filter(),
-        ema_decay=None,
+        ema_decay=0.99,
         num_train_steps=15_000,
         save_interval=1_500,
         keep_period=3_000,
+        fsdp_devices=1,
     ),
     TrainConfig(
         name="pi05_franka_glass_101ep_30hz",
