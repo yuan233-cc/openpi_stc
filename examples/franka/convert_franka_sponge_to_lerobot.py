@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import shutil
+import subprocess
 from typing import Literal
 
 import einops
@@ -57,6 +58,62 @@ import tyro
 
 GRIPPER_MAX_FINGER_WIDTH = 0.04
 DEFAULT_DATA_DIR = "/home/prs/Yuan_Feng/data/raw_pick_up_sponge_42_action_next_state"
+
+
+class NvidiaVideoDataset(LeRobotDataset):
+    """Optional GPU encoding; dataset/state/action handling stays in LeRobot."""
+
+    def encode_episode_videos(self, episode_index: int) -> dict:
+        paths = {}
+        for key in self.meta.video_keys:
+            target = self.root / self.meta.get_video_file_path(episode_index, key)
+            paths[key] = str(target)
+            if target.is_file():
+                continue
+            image_dir = self._get_image_file_path(episode_index=episode_index, image_key=key, frame_index=0).parent
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_suffix(".encoding.mp4")
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-y",
+                    "-threads",
+                    "4",
+                    "-framerate",
+                    str(self.fps),
+                    "-start_number",
+                    "0",
+                    "-i",
+                    str(image_dir / "frame_%06d.png"),
+                    "-an",
+                    "-c:v",
+                    "h264_nvenc",
+                    "-preset",
+                    "p4",
+                    "-rc",
+                    "vbr",
+                    "-cq",
+                    "18",
+                    "-b:v",
+                    "0",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-g",
+                    "2",
+                    "-bf",
+                    "0",
+                    "-movflags",
+                    "+faststart",
+                    str(temporary),
+                ],
+                check=True,
+            )
+            temporary.replace(target)
+        return paths
 
 
 def _to_numpy(value) -> np.ndarray:
@@ -258,6 +315,7 @@ def main(
     default_task: str = "pick up the sponge",
     image_writer_processes: int = 0,
     image_writer_threads: int = 10,
+    video_encoder: Literal["default", "nvenc"] = "default",
     max_frames: int | None = None,
     push_to_hub: bool = False,
     overwrite: bool = False,
@@ -275,6 +333,7 @@ def main(
         default_task: Prompt used only when the source task metadata has no matching task.
         image_writer_processes: Worker processes used to write temporary image frames.
         image_writer_threads: Image-writer threads per process, or total threads when processes is zero.
+        video_encoder: Use default LeRobot CPU encoding, or nvenc for NVIDIA H.264 via ffmpeg.
         max_frames: Optional smoke-test limit.  If set, conversion stops after
             this many frames and saves the current partial episode.
         push_to_hub: Push the converted dataset to Hugging Face Hub.
@@ -330,7 +389,8 @@ def main(
             "names": ["height", "width", "channel"],
         }
 
-    dataset = LeRobotDataset.create(
+    dataset_class = NvidiaVideoDataset if video_encoder == "nvenc" else LeRobotDataset
+    dataset = dataset_class.create(
         repo_id=repo_id,
         root=output_path,
         robot_type="franka_fr3",

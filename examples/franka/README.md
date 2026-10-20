@@ -1,5 +1,8 @@
 # Fine-tuning pi0.5 on the Franka sponge dataset
 
+For ROS WebSocket inference commands and the checkpoint/config selection table,
+see [README_inference.md](README_inference.md).
+
 The raw dataset is a LeRobot v3 recording, but its recorder-native state and
 action fields are not directly suitable for OpenPI. The converter follows the
 custom-data workflow in the repository README and writes a new LeRobot dataset
@@ -275,3 +278,152 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py \
   --data.dataset-root=/path/to/franka_glass_101ep_pi05_two_camera_30hz \
   --exp-name=pick_up_glass_101ep_30hz_lora
 ```
+
+## Green cup, D435if + D405, 10 Hz
+
+`pi05_franka_cup_10hz` uses the complete 98-episode, 44,529-frame dataset
+`yuan1119/franka_cup_d435if_d405_pi05_10hz`. `image` is D435if RGB at 1920x1080;
+`wrist_image` is D405 RGB center-cropped to 640x480. Each recorded task supplies
+its own language prompt. States are absolute 7-D poses/openings; stored actions
+are absolute next measured poses/openings. The training transform converts pose
+actions to deltas relative to the chunk's initial state using SO(3) rotations;
+the measured gripper opening remains absolute. A 50-step chunk spans 5 seconds.
+
+The default is full-parameter training: `gemma_2b` + `gemma_300m`, with no
+LoRA adapters or frozen model parameters. It follows the old global-batch-64
+`pi05_put_two_smallglass_15hz_full` recipe (before commit `857b98e`):
+
+| Setting | Value |
+| --- | --- |
+| Global batch size | 64 (divided across visible GPUs) |
+| Data workers | 4 |
+| Training steps | 15,000 |
+| LR schedule | Linear warmup + cosine decay |
+| Warmup steps | 1,000 |
+| Peak / final learning rate | `2.5e-5` / `2.5e-6` |
+| Decay steps | 15,000, including warmup |
+| Optimizer | AdamW, beta1 `0.9`, beta2 `0.95`, epsilon `1e-8` |
+| Weight decay / gradient norm clip | `1e-10` / `1.0` |
+| EMA | `0.99` |
+| Save interval / periodic retention | 1,000 / 3,000 steps |
+| Log interval / seed | 100 steps / 42 |
+| FSDP devices | 1 by default; override for the cluster |
+| Model compute dtype | `bfloat16` |
+| Action horizon | 50 steps at 10 Hz (5 seconds) |
+
+The later two-glass configuration's global batch 128 means 64 per GPU on two
+GPUs; this cup configuration uses **global batch 64**. Adjust FSDP to the cluster
+hardware, for example `--fsdp-devices=2` for a two-GPU FSDP group. The global
+batch must be divisible by the number of visible GPUs, and the visible GPU
+count must be divisible by the FSDP group size. Existing cup norm stats remain
+valid because the data, relative-pose transform and action horizon are unchanged.
+No machine-specific data path is stored in this configuration.
+From the repository root, set one cluster-local path:
+
+```bash
+export DATASET_DIR=/path/to/franka_cup_d435if_d405_pi05_10hz_v21
+
+# Recompute only when changing the dataset, pose transforms, or action horizon.
+uv run scripts/compute_norm_stats.py \
+  --config-name pi05_franka_cup_10hz \
+  --dataset-root "$DATASET_DIR" \
+  --lowdim-only
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py \
+  pi05_franka_cup_10hz \
+  --data.dataset-root "$DATASET_DIR" \
+  --exp-name green_cup_10hz \
+  --no-wandb-enabled
+```
+
+The cup-specific statistics live at
+`assets/pi05_franka_cup_10hz/yuan1119/franka_cup_d435if_d405_pi05_10hz/norm_stats.json`.
+Copy that asset directory together with the updated repository code to the
+cluster; the dataset itself can stay in any directory. There is no need to copy
+local Hugging Face cache symlinks or repeat data conversion. The cluster also
+needs access to the configured pi05 base weights and tokenizer cache/download.
+
+`--lowdim-only` is restricted to this 7-D Franka transform contract. It reads
+Parquet state/actions without decoding images, uses the same relative-pose
+transform as training, and includes every frame and all 50 action targets per
+start frame, including LeRobot's episode-end padding. Thus a final short batch
+is not dropped when computing statistics. It generates mean/std and the 1%/99%
+quantiles used by pi05. The standard image-decoding statistics path is unchanged.
+
+### Cup 数据集：集群训练交接说明
+
+请在集群执行以下流程，不要重新转换、重新裁剪或再次把 next state 移位为 action。
+这是 **pi05 全量训练，不是 LoRA**。使用单节点 GPU；本仓库训练脚本不支持多节点。
+全量训练需要较大显存，建议先分配单张 80GB GPU；多 GPU 可用 FSDP 分片，实际
+batch=64 的显存是否够用需由集群实测，不要静默降低 batch 或改成 LoRA。
+
+- 代码：<https://github.com/yuan233-cc/openpi_stc>，分支 `main`。
+- 公共数据：<https://huggingface.co/datasets/yuan1119/franka_cup_d435if_d405_pi05_10hz>。
+- ZIP：`franka_cup_d435if_d405_pi05_10hz_v21.zip`，ZIP64 格式。
+- 配置：`pi05_franka_cup_10hz`，上表超参数不变。
+- 归一化统计已随 Git 提交，无需重算。数据仓库是 ZIP 发布格式，必须解压并指定
+  `--data.dataset-root`，不能指望 LeRobot 根据 repo ID 自动下载并解压 ZIP。
+- ZIP 是传输包，训练必须读取可随机访问的解压目录；若平台支持挂载 ZIP，必须提供
+  可正常随机 seek 的 MP4 文件，否则先解压到持久盘。下载包加解压至少预留 15GB，
+  模型、依赖和训练 checkpoint 另需空间；不要把 checkpoint 写到易清理的临时盘。
+
+下列 `/path/to/...` 由集群操作方换成实际挂载路径，不依赖原采集电脑的目录。
+
+```bash
+# 1. 同步代码；已有仓库时先检查 git status，不要覆盖本地改动。
+git clone --recurse-submodules https://github.com/yuan233-cc/openpi_stc.git
+cd openpi_stc
+git submodule update --init --recursive
+git rev-parse HEAD  # 保存本次使用的提交 ID
+
+# 2. 使用仓库锁定的依赖；需要 uv、NVIDIA 驱动和 FFmpeg 运行库。
+GIT_LFS_SKIP_SMUDGE=1 uv sync --frozen
+GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+
+# 3. 下载公共 ZIP（不需要 HF token），并验证 SHA256。
+export CUP_DOWNLOAD_DIR=/path/to/persistent/downloads/cup
+export CUP_DATA_PARENT=/path/to/persistent/datasets
+mkdir -p "$CUP_DOWNLOAD_DIR" "$CUP_DATA_PARENT"
+uv run python -c 'import os; from huggingface_hub import snapshot_download; snapshot_download(repo_id="yuan1119/franka_cup_d435if_d405_pi05_10hz", repo_type="dataset", local_dir=os.environ["CUP_DOWNLOAD_DIR"])'
+(cd "$CUP_DOWNLOAD_DIR" && sha256sum -c SHA256SUMS)
+
+# 若平台已提供 ZIP 挂载/下载，跳过下载，仍需检查校验和与完整标记。
+# 不要解压覆盖已有数据目录；若目录已存在，先验证，再决定是否复用。
+unzip -n "$CUP_DOWNLOAD_DIR/franka_cup_d435if_d405_pi05_10hz_v21.zip" -d "$CUP_DATA_PARENT"
+export DATASET_DIR="$CUP_DATA_PARENT/franka_cup_d435if_d405_pi05_10hz_v21"
+
+# 4. 完整文件哈希检查 + 真正训练输入流水线检查（不启动模型训练）。
+# 首次可能下载 tokenizer，需要联网或预置缓存。
+JAX_PLATFORMS=cpu uv run scripts/verify_cup_dataset.py --dataset-root "$DATASET_DIR"
+
+# 5. 在已分配 GPU 的作业内确认 JAX 看得到 GPU。
+uv run python -c 'import jax; print(jax.devices()); assert jax.default_backend() == "gpu"'
+
+# 6. 单节点训练。单 GPU 用 1；双 GPU 可改为 2，四 GPU 可改为 4。
+# CUDA_VISIBLE_DEVICES 应由调度器管理；global batch 始终是 64。
+export CUP_FSDP_DEVICES=1
+export CUP_CHECKPOINT_DIR=/path/to/persistent/checkpoints
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py \
+  pi05_franka_cup_10hz \
+  --data.dataset-root "$DATASET_DIR" \
+  --exp-name cup_full_b64_run1 \
+  --checkpoint-base-dir "$CUP_CHECKPOINT_DIR" \
+  --fsdp-devices "$CUP_FSDP_DEVICES" \
+  --no-wandb-enabled
+```
+
+checkpoint 将写入 `$CUP_CHECKPOINT_DIR/pi05_franka_cup_10hz/cup_full_b64_run1/`。
+恢复同一个实验时，在训练命令追加 `--resume`；不要加 `--overwrite`。新实验使用新
+`--exp-name`。FSDP 组大小必须整除可见 GPU 数，global batch 必须能被可见 GPU 数整除。
+上述命令只能在实际分配到 GPU 的进程/作业内启动，具体 Slurm/PBS 参数由集群决定。
+
+首次训练还需要下载 `gs://openpi-assets/checkpoints/pi05_base/params`、tokenizer
+及相关缓存；公共 cup ZIP **不包含模型权重**。离线计算节点需预置缓存（参照
+`OPENPI_DATA_HOME` / `HF_HOME` 的实现与集群存储策略），或先在联网节点准备。
+不要全局设置 `JAX_PLATFORMS=cpu`，它仅用于上面的数据验证命令。
+
+已知采集限制：原 recorder 按周期取各话题最新值，不是严格曝光/机器人状态时间同步；
+语言描述来自下达指令，不保证与视觉估计的最终物体位移完全一致。打包保留完整
+98 段，不自动筛选或改标签。相关审计报告随公共发布提供，不应将“转换校验通过”
+等同于“所有原始监督无噪声”。训练启动前请记录 Git SHA、数据 ZIP SHA256、GPU
+数量/型号和实际命令；不要重复生成不同语义的 action 或使用其他任务的 norm stats。
