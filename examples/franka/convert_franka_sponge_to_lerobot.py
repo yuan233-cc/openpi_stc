@@ -218,7 +218,7 @@ def _iter_lowdim_episodes(data_dir: Path, *, batch_size: int = 512, default_task
 def _validate_next_state_actions(
     frames: list[dict],
     *,
-    gripper_action_mode: Literal["next_state", "binary_command"] = "next_state",
+    gripper_action_mode: Literal["next_state", "binary_command"] = "binary_command",
     atol: float = 1e-6,
 ) -> None:
     """Check that the pose action is the next state and validate its gripper label."""
@@ -311,7 +311,7 @@ def main(
     output_root: str | None = None,
     image_key: str | None = None,
     wrist_image_key: str | None = None,
-    gripper_action_mode: Literal["next_state", "binary_command"] = "next_state",
+    gripper_action_mode: Literal["next_state", "binary_command"] = "binary_command",
     default_task: str = "pick up the sponge",
     image_writer_processes: int = 0,
     image_writer_threads: int = 10,
@@ -328,8 +328,8 @@ def main(
         output_root: Optional output root. Defaults to HF_LEROBOT_HOME / repo_id.
         image_key: Source camera key. If omitted, select a known main-camera key automatically.
         wrist_image_key: Optional second camera key. D405 is selected automatically when available.
-        gripper_action_mode: ``next_state`` verifies the action gripper against the next measured state;
-            ``binary_command`` preserves and validates explicit 0/1 open/close command labels.
+        gripper_action_mode: ``binary_command`` preserves and validates explicit 0/1 open/close
+            command labels (the default); ``next_state`` verifies measured next-state gripper values.
         default_task: Prompt used only when the source task metadata has no matching task.
         image_writer_processes: Worker processes used to write temporary image frames.
         image_writer_threads: Image-writer threads per process, or total threads when processes is zero.
