@@ -417,9 +417,7 @@ def main(
     print(f"image key: {image_key} ({width}x{height}x{channels})")
     if wrist_image_key is not None:
         print(f"wrist image key: {wrist_image_key} ({wrist_width}x{wrist_height}x{wrist_channels})")
-    print(
-        f"actions={action_pose_source} pose; gripper={gripper_action_mode}; quaternion rotations -> axis-angle"
-    )
+    print(f"actions={action_pose_source} pose; gripper={gripper_action_mode}; quaternion rotations -> axis-angle")
     print(f"image writers={image_writer_processes} processes x {image_writer_threads} threads")
 
     expected_frames = int(info["total_frames"])
