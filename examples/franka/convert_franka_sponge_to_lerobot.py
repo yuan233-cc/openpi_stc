@@ -219,9 +219,10 @@ def _validate_next_state_actions(
     frames: list[dict],
     *,
     gripper_action_mode: Literal["next_state", "binary_command"] = "binary_command",
+    action_pose_source: Literal["next-state", "raw-action"] = "next-state",
     atol: float = 1e-6,
 ) -> None:
-    """Check that the pose action is the next state and validate its gripper label."""
+    """Validate action rows, optionally requiring next-state pose semantics."""
     for index, frame in enumerate(frames):
         is_terminal = index + 1 == len(frames) or frame["episode"] != frames[index + 1]["episode"]
         target_state = frame["state"] if is_terminal else frames[index + 1]["state"]
@@ -231,14 +232,16 @@ def _validate_next_state_actions(
         if not np.all(np.isfinite(action)):
             raise ValueError(f"Episode {frame['episode']} frame {index} has non-finite action values")
 
-        if not np.allclose(action[:7], target_state[:7], rtol=0.0, atol=atol):
+        if action_pose_source == "next-state" and not np.allclose(action[:7], target_state[:7], rtol=0.0, atol=atol):
             max_error = float(np.max(np.abs(action[:7] - target_state[:7])))
             raise ValueError(
                 f"Episode {frame['episode']} frame {index} pose action is not the next state "
                 f"(max error {max_error:.3g}); this converter only supports action_next_state poses."
             )
 
-        if gripper_action_mode == "next_state":
+        if action_pose_source not in ("next-state", "raw-action"):
+            raise ValueError(f"unknown action pose source: {action_pose_source}")
+        if gripper_action_mode == "next_state" and action_pose_source == "next-state":
             expected_gripper = _gripper_from_raw_state(target_state)
             if not np.isclose(action[7], expected_gripper, rtol=0.0, atol=atol):
                 raise ValueError(
@@ -311,6 +314,7 @@ def main(
     output_root: str | None = None,
     image_key: str | None = None,
     wrist_image_key: str | None = None,
+    action_pose_source: Literal["next-state", "raw-action"] = "next-state",
     gripper_action_mode: Literal["next_state", "binary_command"] = "binary_command",
     default_task: str = "pick up the sponge",
     image_writer_processes: int = 0,
@@ -328,6 +332,8 @@ def main(
         output_root: Optional output root. Defaults to HF_LEROBOT_HOME / repo_id.
         image_key: Source camera key. If omitted, select a known main-camera key automatically.
         wrist_image_key: Optional second camera key. D405 is selected automatically when available.
+        action_pose_source: ``next-state`` validates pose actions against the next state;
+            ``raw-action`` preserves arbitrary recorder command poses.
         gripper_action_mode: ``binary_command`` preserves and validates explicit 0/1 open/close
             command labels (the default); ``next_state`` verifies measured next-state gripper values.
         default_task: Prompt used only when the source task metadata has no matching task.
@@ -412,7 +418,7 @@ def main(
     if wrist_image_key is not None:
         print(f"wrist image key: {wrist_image_key} ({wrist_width}x{wrist_height}x{wrist_channels})")
     print(
-        f"actions=absolute recorded next-state pose; gripper={gripper_action_mode}; quaternion rotations -> axis-angle"
+        f"actions={action_pose_source} pose; gripper={gripper_action_mode}; quaternion rotations -> axis-angle"
     )
     print(f"image writers={image_writer_processes} processes x {image_writer_threads} threads")
 
@@ -426,7 +432,11 @@ def main(
     seen_episodes = 0
     written_frames = 0
     for episode in _iter_lowdim_episodes(data_path, default_task=default_task):
-        _validate_next_state_actions(episode, gripper_action_mode=gripper_action_mode)
+        _validate_next_state_actions(
+            episode,
+            action_pose_source=action_pose_source,
+            gripper_action_mode=gripper_action_mode,
+        )
         seen_frames += len(episode)
         seen_episodes += 1
 

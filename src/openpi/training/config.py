@@ -898,7 +898,7 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_franka_cup_10hz",
-        # D435if base RGB + D405 wrist RGB, 98 episodes at 10 Hz.
+        # Merged cup dataset: D435if base RGB + D405 wrist RGB at 10 Hz.
         # Full tuning follows the old global-batch-64 two-glass recipe
         # (pi05_put_two_smallglass_15hz_full before commit 857b98e).
         # Pass the cluster's data path through --data.dataset-root.
@@ -910,7 +910,9 @@ _CONFIGS = [
             action_expert_variant="gemma_300m",
         ),
         data=SimpleDataConfig(
-            repo_id="yuan1119/franka_cup_d435if_d405_pi05_10hz",
+            repo_id="yuan1119/cup_merge_21_10_pi05_raw_action_1280x1080",
+            # This asset matches the preserved raw recorder action poses.
+            assets=AssetsConfig(asset_id="cup_merge_21_10_pi05_raw_action"),
             data_transforms=lambda model: _transforms.Group(
                 inputs=[
                     franka_policy.FrankaInputs(model_type=model.model_type),
