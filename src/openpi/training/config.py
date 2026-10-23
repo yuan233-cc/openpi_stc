@@ -958,6 +958,63 @@ _CONFIGS = [
         fsdp_devices=1,
     ),
     TrainConfig(
+        name="pi05_franka_relative_oct23_10hz",
+        # Relative Oct 23 cup dataset: D435if base RGB + D405 wrist RGB at 10 Hz.
+        # Raw recorder pose commands and binary gripper commands are preserved.
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=50,
+            discrete_state_input=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+        ),
+        data=SimpleDataConfig(
+            repo_id="yuan1119/relative_Oct_23_pi05_raw_action_1280x1080",
+            assets=AssetsConfig(asset_id="relative_Oct_23_pi05_raw_action_1280x1080"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[
+                    franka_policy.FrankaInputs(model_type=model.model_type),
+                    franka_policy.FrankaRelativeActions(),
+                ],
+                outputs=[
+                    franka_policy.FrankaAbsoluteActions(),
+                    franka_policy.FrankaOutputs(),
+                ],
+            ),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image": "image",
+                                "observation/wrist_image": "wrist_image",
+                                "observation/state": "state",
+                                "actions": "actions",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+            ),
+        ),
+        batch_size=64,
+        num_workers=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=15_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        ema_decay=0.99,
+        num_train_steps=15_000,
+        save_interval=1_000,
+        keep_period=3_000,
+        fsdp_devices=1,
+    ),
+    TrainConfig(
         name="pi05_franka_glass_101ep",
         # Full-parameter fine-tuning for the strict 15 Hz, 101-episode glass dataset.
         # D455 is the base view and D405 is the wrist/second view.
